@@ -1,4 +1,5 @@
 const { randomBytes } = require('node:crypto');
+const { createEmojiKeyboard } = require('./emoji');
 const { parseDomain } = require('./domain');
 const { searchEmojis } = require('./search');
 
@@ -8,6 +9,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
   const selected = new Map();
   const pending = new Map();
   const hasEmojis = db.prepare('SELECT 1 FROM emojis LIMIT 1');
+  const decorateKeyboard = createEmojiKeyboard(db);
   const confirmation = new Map();
   const issuer = () => domainSetup.current() ? 'https://' + domainSetup.current() : oauth?.issuer;
   function menu(id) {
@@ -24,7 +26,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
         if (hasEmojis.get()) keyboard[1].unshift('Поиск');
         if (pending.has(id)) keyboard.push(['Отмена']);
     }
-    return { keyboard, resize_keyboard: true, is_persistent: true };
+    return { keyboard: decorateKeyboard(keyboard), resize_keyboard: true, is_persistent: true };
   }
   const send = (chatId, text, options = {}) => telegram.call('sendMessage', {
     chat_id: chatId, text, link_preview_options: { is_disabled: true }, ...options

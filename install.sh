@@ -64,6 +64,7 @@ if [[ -f "$CONF" ]]; then
     exit 1
   fi
 fi
+pm2 delete telegram-emoji-updater >/dev/null 2>&1 || true
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 

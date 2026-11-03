@@ -61,12 +61,18 @@ Authorization: Bearer <ключ>
 
 ## Обновления и обслуживание
 
-Автообновлятор проверяет `origin/main` раз в минуту. При наличии fast-forward обновления и отсутствии локальных изменений он устанавливает зависимости и перезапускает основной процесс.
+Основной процесс `telegram-emoji` под PM2 проверяет `origin/main` раз в минуту. При fast-forward обновлении и чистой рабочей копии он устанавливает зависимости, проверяет синтаксис и завершается. PM2 запускает его снова с обновлённым кодом.
+
+При переходе со старой версии один раз выполни в папке проекта:
+
+```bash
+sudo pm2 delete telegram-emoji-updater
+git pull --ff-only origin main && sudo pm2 restart telegram-emoji && sudo pm2 save
+```
 
 ```bash
 pm2 status
 pm2 logs telegram-emoji
-pm2 logs telegram-emoji-updater
 ```
 
 ## Ограничения

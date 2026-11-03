@@ -6,21 +6,27 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
   let offset = 0;
   const selected = new Map();
   const pending = new Map();
-  const menu = {
-    keyboard: [['Поиск', 'Наборы'], ['Добавить набор', 'Подключение MCP'], ['Настроить домен', 'Отозвать ключ']],
-    resize_keyboard: true
-  };
+  const hasEmojis = db.prepare('SELECT 1 FROM emojis LIMIT 1');
+  function menu(id) {
+    const keyboard = [];
+    if (!domainSetup.current()) keyboard.push(['Настроить домен']);
+    keyboard.push(['Добавить набор', 'Наборы']);
+    if (hasEmojis.get()) keyboard.push(['Поиск']);
+    if (domainSetup.current()) keyboard.push(['Подключение MCP', 'Настроить домен']);
+    keyboard.push(pending.has(id) ? ['Отмена', 'Отозвать ключ'] : ['Отозвать ключ']);
+    return { keyboard, resize_keyboard: true, is_persistent: true };
+  }
   const send = (chatId, text, options = {}) => telegram.call('sendMessage', {
     chat_id: chatId, text, link_preview_options: { is_disabled: true }, ...options
   });
   const aliases = new Map([
     ['Наборы', '/packs'], ['Подключение MCP', '/token'], ['Настроить домен', '/domain'],
-    ['Отозвать ключ', '/revoke']
+    ['Отозвать ключ', '/revoke'], ['Отмена', '/cancel']
   ]);
 
   async function askDomain(chatId, id) {
     pending.set(id, 'domain');
-    await send(chatId, 'Введи домен, например emoji.example.com. Его A-запись должна вести на публичный IPv4 сервера. Для выпуска сертификата открой входящие порты 80 и 443.\n\n/cancel — отмена', { reply_markup: menu });
+    await send(chatId, 'Введи домен, например emoji.example.com. Его A-запись должна вести на публичный IPv4 сервера. Для выпуска сертификата открой входящие порты 80 и 443.\n\n/cancel — отмена', { reply_markup: menu(id) });
   }
 
   async function handle(message) {
@@ -36,7 +42,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
     if (!input) return;
     if (input === '/cancel') {
       pending.delete(id);
-      await send(chatId, 'Ввод отменён.', { reply_markup: menu });
+      await send(chatId, 'Ввод отменён.', { reply_markup: menu(id) });
       return;
     }
     if (input === '/start' || input === '/help') {
@@ -46,7 +52,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
         await send(chatId, 'Telegram Emoji MCP. Начнём с настройки HTTPS.');
         await askDomain(chatId, id);
       } else {
-        await send(chatId, 'Telegram Emoji MCP\nhttps://' + domain + '/mcp\n\nДобавляй наборы и подбирай эмодзи для своих проектов.', { reply_markup: menu });
+        await send(chatId, 'Telegram Emoji MCP\nhttps://' + domain + '/mcp\n\nДобавляй наборы и подбирай эмодзи для своих проектов.', { reply_markup: menu(id) });
       }
       return;
     }
@@ -54,9 +60,16 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       await askDomain(chatId, id);
       return;
     }
-    if (input === 'Поиск' || input === 'Добавить набор') {
-      pending.set(id, input === 'Поиск' ? 'search' : 'pack');
-      await send(chatId, input === 'Поиск' ? 'Введи эмодзи или слово для поиска по каталогу.' : 'Пришли ссылку на набор t.me/addemoji/…', { reply_markup: menu });
+    const isSearch = input === 'Поиск' || /^\/(?:search|find)(?:\s|$)/.test(input)
+      || (!input.startsWith('/') && pending.get(id) === 'search' && input !== 'Добавить набор');
+    if (isSearch && !hasEmojis.get()) {
+      pending.set(id, 'pack');
+      await send(chatId, 'Сначала добавь набор. Пришли ссылку t.me/addemoji/…', { reply_markup: menu(id) });
+      return;
+    }
+    if (input === 'Поиск' || input === 'Добавить набор' || input === '/add' || input === '/search') {
+      pending.set(id, isSearch ? 'search' : 'pack');
+      await send(chatId, isSearch ? 'Введи эмодзи или слово для поиска по каталогу.' : 'Пришли ссылку на набор t.me/addemoji/…', { reply_markup: menu(id) });
       return;
     }
     if (!input.startsWith('/')) {
@@ -66,11 +79,11 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
         pending.delete(id);
         await send(chatId, 'Проверяю DNS и настраиваю HTTPS. Это может занять несколько минут.');
         domainSetup.setup(domain).then(
-          () => send(chatId, 'MCP готов: https://' + domain + '/mcp', { reply_markup: menu }),
+          () => send(chatId, 'MCP готов: https://' + domain + '/mcp', { reply_markup: menu(id) }),
           error => {
             if (!pending.has(id)) pending.set(id, 'domain');
             onError(error);
-            return send(chatId, error.code ? 'Не удалось завершить настройку. Проверь журнал PM2 и повтори попытку.' : error.message, { reply_markup: menu });
+            return send(chatId, error.code ? 'Не удалось завершить настройку. Проверь журнал PM2 и повтори попытку.' : error.message, { reply_markup: menu(id) });
           }
         ).catch(onError);
         return;
@@ -85,13 +98,15 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
         FROM emojis e JOIN packs p ON p.id=e.pack_id ORDER BY e.id`).all();
       const results = searchEmojis(rows, input.slice(8), 15);
       await send(chatId, results.length ? results.map(item =>
-        (item.emoji || 'Эмодзи') + ' · ' + item.custom_emoji_id).join('\n') : 'Совпадений нет. Попробуй другой символ или запрос.');
+        (item.emoji || 'Эмодзи') + ' · ' + item.custom_emoji_id).join('\n') : 'Совпадений нет. Попробуй другой символ или запрос.', { reply_markup: menu(id) });
       return;
     }
     if (input === '/token') {
       const domain = domainSetup.current();
+      if (!domain) return askDomain(chatId, id);
+      pending.delete(id);
       const { token } = auth.issue(id);
-      await send(chatId, (domain ? 'https://' + domain + '/mcp\n\n' : 'Домен ещё не настроен.\n\n') + 'Ключ MCP на 24 часа:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
+      await send(chatId, ('https://' + domain + '/mcp\n\n') + 'Ключ MCP на 24 часа:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
       return;
     }
     if (input === '/revoke') {
@@ -100,8 +115,9 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       return;
     }
     if (input === '/packs') {
+      pending.delete(id);
       const packs = db.prepare('SELECT title,short_name,total_count FROM packs ORDER BY title').all();
-      await send(chatId, packs.length ? packs.slice(0, 20).map(p => p.title.slice(0, 90) + ' (' + p.short_name + '): ' + p.total_count).join('\n') : 'Наборов пока нет.');
+      await send(chatId, packs.length ? packs.slice(0, 20).map(p => p.title.slice(0, 90) + ' (' + p.short_name + '): ' + p.total_count).join('\n') : 'Наборов пока нет. Нажми «Добавить набор».', { reply_markup: menu(id) });
       return;
     }
     if (input.startsWith('/add ')) {
@@ -109,6 +125,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       if (!/^[A-Za-z0-9_]{1,64}$/.test(name)) throw new Error('Некорректная ссылка на набор');
       const set = await telegram.getStickerSet(name);
       if (set.sticker_type !== 'custom_emoji') throw new Error('Это не набор Custom Emoji');
+      if (!set.stickers.some(item => item.custom_emoji_id)) throw new Error('В наборе нет кастомных эмодзи');
       const tx = db.transaction(() => {
         db.prepare(`INSERT INTO packs(short_name,title,pack_type,total_count,synced_at)
           VALUES(?,?,?,?,?) ON CONFLICT(short_name) DO UPDATE SET title=excluded.title,total_count=excluded.total_count,synced_at=excluded.synced_at`)
@@ -125,9 +142,9 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
         }
       });
       tx();
-      if (pending.get(id) === 'pack') pending.delete(id);
+      pending.delete(id);
       selected.set(id,name);
-      await send(chatId,'Добавлен набор: ' + set.title + '\nЭмодзи: ' + set.stickers.length + '\nИспользуйте /find запрос');
+      await send(chatId,'Добавлен набор: ' + set.title + '\nЭмодзи: ' + set.stickers.length + '\nНажми «Поиск», чтобы найти эмодзи.', { reply_markup: menu(id) });
       return;
     }
     if (input.startsWith('/use ')) {
@@ -142,7 +159,10 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       const name = selected.get(id);
       if (!name) throw new Error('Сначала выберите набор: /use PackName');
       const pack = db.prepare('SELECT id,title FROM packs WHERE short_name=?').get(name);
-      if (!pack) throw new Error('Набор больше не существует');
+      if (!pack) {
+        selected.delete(id);
+        return send(chatId, 'Выбранный набор удалён. Выбери другой через /use или нажми «Поиск».', { reply_markup: menu(id) });
+      }
       const rows = db.prepare('SELECT custom_emoji_id,emoji,description FROM emojis WHERE pack_id=?').all(pack.id);
       const results = searchEmojis(rows,input.slice(6),20);
       await send(chatId,results.length ? results.map(e => (e.emoji || 'Эмодзи') + ' — ' + e.custom_emoji_id).join('\n') : 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');

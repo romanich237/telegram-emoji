@@ -5,6 +5,21 @@ const { searchEmojis } = require('./search');
 
 function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, onError = console.error }) {
   let running = true;
+  const commands = [
+    { command: 'start', description: 'Главное меню' },
+    { command: 'help', description: 'Помощь по боту' },
+    { command: 'packs', description: 'Список наборов эмодзи' },
+    { command: 'add', description: 'Добавить набор эмодзи' },
+    { command: 'search', description: 'Поиск по всем наборам' },
+    { command: 'use', description: 'Выбрать наборы по номерам' },
+    { command: 'find', description: 'Поиск в выбранных наборах' },
+    { command: 'mcp', description: 'Настройки MCP' },
+    { command: 'token', description: 'Получить ключ MCP' },
+    { command: 'cancel', description: 'Отменить текущее действие' }
+  ];
+  telegram.call('setMyCommands', { commands }).catch(error => {
+    onError(new Error('Не удалось зарегистрировать команды бота: ' + error.message));
+  });
   let offset = 0;
   const selected = new Map();
   const pending = new Map();

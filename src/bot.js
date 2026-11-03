@@ -24,6 +24,24 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
     ['Отозвать ключ', '/revoke'], ['Отмена', '/cancel']
   ]);
 
+  const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  async function sendResults(chatId, id, results, emptyMessage) {
+    if (!results.length) return send(chatId, emptyMessage, { reply_markup: menu(id) });
+    const rows = results.map(item => {
+      const emoji = escapeHtml(item.emoji || '🙂');
+      const tag = '<tg-emoji emoji-id="' + escapeHtml(item.custom_emoji_id) + '">' + emoji + '</tg-emoji>';
+      return { emoji, tag, code: '<code>' + escapeHtml(tag) + '</code>' };
+    });
+    const options = { parse_mode: 'HTML', reply_markup: menu(id) };
+    try {
+      return await send(chatId, rows.map(row => row.tag + ' - ' + row.code).join('\n'), options);
+    } catch (error) {
+      if (!/custom.?emoji|parse entities/i.test(error.message)) throw error;
+      return send(chatId, rows.map(row => row.emoji + ' - ' + row.code).join('\n'), options);
+    }
+  }
+
   async function askDomain(chatId, id) {
     pending.set(id, 'domain');
     await send(chatId, 'Введи домен, например emoji.example.com. Его A-запись должна вести на публичный IPv4 сервера. Для выпуска сертификата открой входящие порты 80 и 443.\n\n/cancel — отмена', { reply_markup: menu(id) });
@@ -97,8 +115,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
         e.description || ' ' || p.title || ' ' || p.short_name AS description
         FROM emojis e JOIN packs p ON p.id=e.pack_id ORDER BY e.id`).all();
       const results = searchEmojis(rows, input.slice(8), 15);
-      await send(chatId, results.length ? results.map(item =>
-        (item.emoji || 'Эмодзи') + ' · ' + item.custom_emoji_id).join('\n') : 'Совпадений нет. Попробуй другой символ или запрос.', { reply_markup: menu(id) });
+      await sendResults(chatId, id, results, 'Совпадений нет. Попробуй другой символ или запрос.');
       return;
     }
     if (input === '/token') {
@@ -165,7 +182,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       }
       const rows = db.prepare('SELECT custom_emoji_id,emoji,description FROM emojis WHERE pack_id=?').all(pack.id);
       const results = searchEmojis(rows,input.slice(6),20);
-      await send(chatId,results.length ? results.map(e => (e.emoji || 'Эмодзи') + ' — ' + e.custom_emoji_id).join('\n') : 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');
+      await sendResults(chatId, id, results, 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');
       return;
     }
     await send(chatId,'Неизвестная команда. Используйте /help');

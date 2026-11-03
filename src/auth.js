@@ -24,12 +24,15 @@ function setupAuth(db, allowedUsers) {
   function verify(token) {
     if (typeof token !== 'string' || !token) return false;
     const hash = crypto.createHash('sha256').update(token).digest('hex');
+    return verifyHash(hash);
+  }
+  function verifyHash(hash) {
     const row = db.prepare('SELECT user_id,expires_at FROM access_tokens WHERE token_hash=?').get(hash);
     return Boolean(row && row.expires_at === 0 && isAllowed(row.user_id));
   }
   function revoke(id) {
     db.prepare('DELETE FROM access_tokens WHERE user_id=?').run(String(id));
   }
-  return { isAllowed, issue, verify, revoke };
+  return { isAllowed, issue, verify, verifyHash, revoke };
 }
 module.exports = { setupAuth };

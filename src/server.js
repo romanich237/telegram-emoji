@@ -1,3 +1,4 @@
+const { setupOAuth } = require('./oauth');
 const express = require('express');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
@@ -151,9 +152,11 @@ function createApp({ db, telegram, config, auth }) {
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
 
+  const oauth = setupOAuth(app, db, auth, config.oauth);
+
   function authorized(req) {
     const match = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(req.get('authorization') || '');
-    return Boolean(match && auth.verify(match[1]));
+    return Boolean(match && (auth.verify(match[1]) || oauth?.verify(match[1])));
   }
 
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'telegram-emoji', version: '1.0.0' }));
@@ -173,10 +176,15 @@ function createApp({ db, telegram, config, auth }) {
     }
   });
 
-  app.post('/mcp', async (req, res) => {
+  app.all('/mcp', (req, res, next) => {
     if (!authorized(req)) {
+      res.set('WWW-Authenticate', 'Bearer' + (oauth ? ' resource_metadata="' + oauth.metadata + '"' : ''));
       return res.status(401).json({ error: 'Unauthorized' });
     }
+    next();
+  });
+
+  app.post('/mcp', async (req, res) => {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     const mcp = makeMcpServer({ db, telegram, config });
     res.on('close', () => { transport.close(); mcp.close(); });

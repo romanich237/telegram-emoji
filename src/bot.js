@@ -123,7 +123,7 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       if (!domain) return askDomain(chatId, id);
       pending.delete(id);
       const { token } = auth.issue(id);
-      await send(chatId, ('https://' + domain + '/mcp\n\n') + 'Ключ MCP на 24 часа:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
+      await send(chatId, ('https://' + domain + '/mcp\n\n') + 'Бессрочный ключ MCP:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
       return;
     }
     if (input === '/revoke') {

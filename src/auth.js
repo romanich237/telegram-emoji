@@ -7,21 +7,25 @@ function setupAuth(db, allowedUsers) {
     user_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
   )`);
+  // Promote existing valid keys without reviving expired keys.
+  db.prepare('UPDATE access_tokens SET expires_at=0 WHERE expires_at>?').run(Date.now());
+  const replaceToken = db.transaction((id, hash) => {
+    db.prepare('DELETE FROM access_tokens WHERE user_id=?').run(id);
+    db.prepare('INSERT INTO access_tokens(token_hash,user_id,expires_at) VALUES(?,?,0)').run(hash, id);
+  });
   function isAllowed(id) { return allowed.has(String(id)); }
   function issue(id) {
     if (!isAllowed(id)) throw new Error('Access denied');
     const token = crypto.randomBytes(32).toString('base64url');
     const hash = crypto.createHash('sha256').update(token).digest('hex');
-    const expires = Date.now() + 24 * 60 * 60 * 1000;
-    db.prepare('DELETE FROM access_tokens WHERE expires_at < ? OR user_id = ?').run(Date.now(), String(id));
-    db.prepare('INSERT INTO access_tokens(token_hash,user_id,expires_at) VALUES(?,?,?)').run(hash,String(id),expires);
-    return { token, expires };
+    replaceToken(String(id), hash);
+    return { token };
   }
   function verify(token) {
     if (typeof token !== 'string' || !token) return false;
     const hash = crypto.createHash('sha256').update(token).digest('hex');
     const row = db.prepare('SELECT user_id,expires_at FROM access_tokens WHERE token_hash=?').get(hash);
-    return Boolean(row && row.expires_at > Date.now() && isAllowed(row.user_id));
+    return Boolean(row && row.expires_at === 0 && isAllowed(row.user_id));
   }
   function revoke(id) {
     db.prepare('DELETE FROM access_tokens WHERE user_id=?').run(String(id));

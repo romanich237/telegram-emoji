@@ -45,12 +45,14 @@ function startBot({ telegram, db, auth, onError = console.error }) {
           VALUES(?,?,?,?,?) ON CONFLICT(short_name) DO UPDATE SET title=excluded.title,total_count=excluded.total_count,synced_at=excluded.synced_at`)
           .run(name,set.title,'custom_emoji',set.stickers.length,new Date().toISOString());
         const pack = db.prepare('SELECT id FROM packs WHERE short_name=?').get(name);
+        const descriptions = new Map(db.prepare('SELECT custom_emoji_id, description FROM emojis WHERE pack_id=?')
+          .all(pack.id).map(item => [item.custom_emoji_id, item.description]));
         db.prepare('DELETE FROM emojis WHERE pack_id=?').run(pack.id);
         const insert = db.prepare(`INSERT INTO emojis(pack_id,custom_emoji_id,file_id,file_unique_id,emoji,description,is_animated,is_video,width,height)
           VALUES(?,?,?,?,?,?,?,?,?,?)`);
         for (const item of set.stickers) {
           if (!item.custom_emoji_id) continue;
-          insert.run(pack.id,item.custom_emoji_id,item.file_id,item.file_unique_id || '',item.emoji || '', '',Number(!!item.is_animated),Number(!!item.is_video),item.width || null,item.height || null);
+          insert.run(pack.id,item.custom_emoji_id,item.file_id,item.file_unique_id || '',item.emoji || '', descriptions.get(item.custom_emoji_id) || '',Number(!!item.is_animated),Number(!!item.is_video),item.width || null,item.height || null);
         }
       });
       tx();

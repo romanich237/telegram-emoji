@@ -27,6 +27,8 @@ function makeMcpServer({ db, telegram, config }) {
           total_count=excluded.total_count, synced_at=excluded.synced_at`)
           .run(shortName, set.title || shortName, set.sticker_type || 'custom_emoji', stickers.length, syncedAt);
         const packRow = db.prepare('SELECT id FROM packs WHERE short_name=?').get(shortName);
+        const descriptions = new Map(db.prepare('SELECT custom_emoji_id, description FROM emojis WHERE pack_id=?')
+          .all(packRow.id).map(item => [item.custom_emoji_id, item.description]));
         db.prepare('DELETE FROM emojis WHERE pack_id=?').run(packRow.id);
         const insert = db.prepare(`INSERT INTO emojis
           (pack_id,custom_emoji_id,file_id,file_unique_id,emoji,description,is_animated,is_video,width,height)
@@ -34,7 +36,7 @@ function makeMcpServer({ db, telegram, config }) {
         for (const item of stickers) {
           if (!item.custom_emoji_id) continue;
           insert.run(packRow.id, item.custom_emoji_id, item.file_id, item.file_unique_id || '',
-            item.emoji || '', '', item.is_animated ? 1 : 0, item.is_video ? 1 : 0,
+            item.emoji || '', descriptions.get(item.custom_emoji_id) || '', item.is_animated ? 1 : 0, item.is_video ? 1 : 0,
             item.width || null, item.height || null);
         }
       });
@@ -110,17 +112,54 @@ function makeMcpServer({ db, telegram, config }) {
     }
   );
 
+  server.tool(
+    'search_emojis',
+    'Подбирает кастомные эмодзи по всему сохранённому каталогу. Ищет по символу, описанию и названию набора.',
+    { query: z.string().trim().min(1).max(300), limit: z.number().int().min(1).max(100).optional() },
+    async ({ query, limit }) => {
+      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji, e.description, e.is_animated,
+        e.is_video, p.short_name, p.title FROM emojis e JOIN packs p ON p.id=e.pack_id
+        ORDER BY e.id`).all();
+      const candidates = searchEmojis(rows.map(row => ({
+        ...row, description: [row.description, row.title, row.short_name].filter(Boolean).join(' ')
+      })), query, rows.length);
+      const seen = new Set();
+      const results = [];
+      for (const item of candidates) {
+        if (seen.has(item.custom_emoji_id)) continue;
+        seen.add(item.custom_emoji_id);
+        const fallback = (item.emoji || '🙂').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        results.push({
+          custom_emoji_id: item.custom_emoji_id,
+          emoji: item.emoji,
+          pack: 'https://t.me/addemoji/' + item.short_name,
+          format: item.is_video ? 'video' : item.is_animated ? 'animated' : 'static',
+          preview_path: '/preview/' + encodeURIComponent(item.custom_emoji_id),
+          telegram_html: '<tg-emoji emoji-id="' + item.custom_emoji_id + '">' + fallback + '</tg-emoji>'
+        });
+        if (results.length >= (limit || config.search.maxResults)) break;
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ query, results }) }], structuredContent: { query, results } };
+    }
+  );
+
   return server;
 }
 
-function createApp({ db, telegram, config }) {
+function createApp({ db, telegram, config, auth }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
 
+  function authorized(req) {
+    const match = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(req.get('authorization') || '');
+    return Boolean(match && auth.verify(match[1]));
+  }
+
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'telegram-emoji', version: '1.0.0' }));
 
   app.get('/preview/:customEmojiId', async (req, res) => {
+    if (!authorized(req)) return res.sendStatus(401);
     try {
       const item = db.prepare('SELECT file_id FROM emojis WHERE custom_emoji_id=?').get(req.params.customEmojiId);
       if (!item) return res.status(404).json({ error: 'Emoji not found' });
@@ -135,8 +174,7 @@ function createApp({ db, telegram, config }) {
   });
 
   app.post('/mcp', async (req, res) => {
-    const expected = config.security.apiKey;
-    if (expected && req.headers.authorization !== `Bearer ${expected}`) {
+    if (!authorized(req)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

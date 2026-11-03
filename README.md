@@ -52,7 +52,9 @@ Authorization: Bearer <ключ>
 
 Endpoint: `http://IP_СЕРВЕРА:ВЫБРАННЫЙ_ПОРТ/mcp`.
 
-Инструменты: `add_emoji_pack`, `list_emoji_packs`, `list_pack_emojis`, `search_pack_emojis`, `annotate_emoji`, `remove_emoji_pack`.
+Для подключения из других проектов используйте Streamable HTTP по `https://ВАШ_ДОМЕН/mcp`. Вызовите `search_emojis` с параметрами `{"query":"сердце","limit":5}`. Ответ содержит `custom_emoji_id`, ссылку на набор, формат, защищённый путь превью и готовый HTML для отправки с `parse_mode: HTML`. Превью запрашивается с тем же Bearer-ключом. Повторный `/token` заменяет ранее выданный ключ.
+
+Инструменты: `search_emojis`, `add_emoji_pack`, `list_emoji_packs`, `list_pack_emojis`, `search_pack_emojis`, `annotate_emoji`, `remove_emoji_pack`.
 
 ## Обновления и обслуживание
 

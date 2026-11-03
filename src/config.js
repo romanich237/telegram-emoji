@@ -1,27 +1,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
-
-const configPath = path.resolve(process.cwd(), 'config.json');
-const examplePath = path.resolve(process.cwd(), 'config.example.json');
-
-if (!fs.existsSync(configPath)) {
-  if (fs.existsSync(examplePath)) {
-    fs.copyFileSync(examplePath, configPath);
-    console.error('Создан config.json. Заполните telegram.botToken и перезапустите сервер.');
-  }
-  throw new Error('Отсутствует config.json');
+const file = path.resolve(process.cwd(),'config.json');
+if (!fs.existsSync(file)) {
+  fs.copyFileSync(path.resolve(process.cwd(),'config.example.json'),file);
+  throw new Error('Создан config.json. Укажите botToken и allowedUsers, затем перезапустите PM2.');
 }
-
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-if (!config.telegram?.botToken) {
-  throw new Error('Укажите telegram.botToken в config.json');
-}
-config.server ||= {};
-config.server.host ||= '127.0.0.1';
-config.server.port = Number(config.server.port || 3210);
-config.database ||= {};
-config.database.path ||= './data/emoji.sqlite';
-config.security ||= {};
-config.search ||= {};
-config.search.maxResults = Number(config.search.maxResults || 30);
-module.exports = config;
+const input = JSON.parse(fs.readFileSync(file,'utf8'));
+if (typeof input.botToken !== 'string' || !/^\d+:[A-Za-z0-9_-]+$/.test(input.botToken)) throw new Error('Некорректный botToken');
+if (!Array.isArray(input.allowedUsers) || !input.allowedUsers.length || !input.allowedUsers.every(id => /^\d+$/.test(String(id)))) throw new Error('Укажите Telegram ID в allowedUsers');
+module.exports = {
+  telegram: { botToken: input.botToken },
+  allowedUsers: input.allowedUsers.map(String),
+  server: { host: '127.0.0.1', port: 3210 },
+  database: { path: './data/emoji.sqlite' },
+  search: { maxResults: 30 }
+};

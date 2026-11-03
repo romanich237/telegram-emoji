@@ -1,26 +1,36 @@
+const { randomBytes } = require('node:crypto');
 const { parseDomain } = require('./domain');
 const { searchEmojis } = require('./search');
 
-function startBot({ telegram, db, auth, domainSetup, onError = console.error }) {
+function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, onError = console.error }) {
   let running = true;
   let offset = 0;
   const selected = new Map();
   const pending = new Map();
   const hasEmojis = db.prepare('SELECT 1 FROM emojis LIMIT 1');
+  const confirmation = new Map();
+  const issuer = () => domainSetup.current() ? 'https://' + domainSetup.current() : oauth?.issuer;
   function menu(id) {
-    const keyboard = [];
-    if (!domainSetup.current()) keyboard.push(['Настроить домен']);
-    keyboard.push(['Добавить набор', 'Наборы']);
-    if (hasEmojis.get()) keyboard.push(['Поиск']);
-    if (domainSetup.current()) keyboard.push(['Подключение MCP', 'Настроить домен']);
-    keyboard.push(pending.has(id) ? ['Отмена', 'Отозвать ключ'] : ['Отозвать ключ']);
+    let keyboard;
+    switch (pending.get(id)) {
+      case 'revoke-first': keyboard = [['Продолжить отзыв'], ['Отмена']]; break;
+      case 'revoke-final': keyboard = [['Да, отозвать ключ'], ['Отмена']]; break;
+      case 'mcp': keyboard = [['Настроить домен', 'Настроить ChatGPT'], ['Получить ключ', 'Отозвать ключ'], ['Сменить секрет OAuth', 'В меню']]; break;
+      case 'callback-rotate':
+      case 'callback':
+      case 'domain': keyboard = [['Отмена']]; break;
+      default:
+        keyboard = [['Добавить набор', 'Наборы'], ['Настройки MCP']];
+        if (hasEmojis.get()) keyboard[1].unshift('Поиск');
+        if (pending.has(id)) keyboard.push(['Отмена']);
+    }
     return { keyboard, resize_keyboard: true, is_persistent: true };
   }
   const send = (chatId, text, options = {}) => telegram.call('sendMessage', {
     chat_id: chatId, text, link_preview_options: { is_disabled: true }, ...options
   });
   const aliases = new Map([
-    ['Наборы', '/packs'], ['Подключение MCP', '/token'], ['Настроить домен', '/domain'],
+    ['Наборы', '/packs'], ['Подключение MCP', '/mcp'], ['Настройки MCP', '/mcp'], ['Получить ключ', '/token'], ['Настроить ChatGPT', '/oauth'], ['Сменить секрет OAuth', '/oauth_rotate'], ['В меню', '/start'], ['Настроить домен', '/domain'],
     ['Отозвать ключ', '/revoke'], ['Отмена', '/cancel']
   ]);
 
@@ -59,18 +69,37 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
     let input = aliases.get(text) || text;
     if (!input) return;
     if (input === '/cancel') {
+      confirmation.delete(id);
       pending.delete(id);
-      await send(chatId, 'Ввод отменён.', { reply_markup: menu(id) });
+      await send(chatId, 'Действие отменено.', { reply_markup: menu(id) });
+      return;
+    }
+    if (input === '/mcp') {
+      pending.set(id, 'mcp');
+      const address = issuer();
+      const status = oauth && oauth.issuer === address ? 'OAuth настроен' : 'OAuth ждёт настройки';
+      await send(chatId, '⚙️ Настройки MCP\n\n' + (address ? address + '/mcp\n' + status : 'Сначала настрой домен и HTTPS.') +
+        '\n\n«Настроить ChatGPT» покажет данные клиента и позволит изменить адрес обратного вызова.', { reply_markup: menu(id) });
+      return;
+    }
+    if (input === '/oauth' || input === '/oauth_rotate') {
+      if (!issuer()) return askDomain(chatId, id);
+      pending.set(id, input === '/oauth_rotate' ? 'callback-rotate' : 'callback');
+      const current = oauth && oauth.issuer === issuer() ?
+        '\n\nТекущий callback: ' + oauth.redirectUri + '\nID клиента: ' + oauth.clientId +
+        '\nСекрет клиента: ' + oauth.clientSecret : '';
+      await send(chatId, 'Подключение ChatGPT\n\nПришли URL обратного вызова из настроек коннектора ChatGPT.' + current,
+        { protect_content: true, reply_markup: menu(id) });
       return;
     }
     if (input === '/start' || input === '/help') {
       pending.delete(id);
-      const domain = domainSetup.current();
+      const domain = issuer();
       if (!domain) {
         await send(chatId, 'Telegram Emoji MCP. Начнём с настройки HTTPS.');
         await askDomain(chatId, id);
       } else {
-        await send(chatId, 'Telegram Emoji MCP\nhttps://' + domain + '/mcp\n\nДобавляй наборы и подбирай эмодзи для своих проектов.', { reply_markup: menu(id) });
+        await send(chatId, 'Telegram Emoji MCP\n' + domain + '/mcp\n\nДобавляй наборы и подбирай эмодзи для своих проектов.', { reply_markup: menu(id) });
       }
       return;
     }
@@ -92,12 +121,33 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
     }
     if (!input.startsWith('/')) {
       const action = pending.get(id);
+      if (action === 'callback' || action === 'callback-rotate') {
+        if (!/^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]{1,200}$/.test(input)) {
+          return send(chatId, 'Пришли полный URL обратного вызова из ChatGPT.', { reply_markup: menu(id) });
+        }
+        const settings = { issuer: issuer(), redirectUri: input, clientId: oauth?.clientId || 'chatgpt',
+          clientSecret: action === 'callback' && oauth?.clientSecret ? oauth.clientSecret : randomBytes(32).toString('base64url') };
+        if (process.env.pm_id === undefined) return send(chatId, 'Для применения настроек запусти сервис через PM2.');
+        saveOAuth(settings);
+        pending.set(id, 'mcp');
+        try {
+          await send(chatId, 'OAuth сохранён. Сервис перезапускается.\n\nURL MCP: ' + settings.issuer + '/mcp' +
+            '\nID клиента: ' + settings.clientId + '\nСекрет клиента: ' + settings.clientSecret +
+            '\nМетод: client_secret_post\nОбласть: emoji\nPKCE: S256', { protect_content: true, reply_markup: menu(id) });
+        } finally {
+          restart();
+        }
+        return;
+      }
       if (action === 'domain') {
         const domain = parseDomain(input);
         pending.delete(id);
         await send(chatId, 'Проверяю DNS и настраиваю HTTPS. Это может занять несколько минут.');
         domainSetup.setup(domain).then(
-          () => send(chatId, 'MCP готов: https://' + domain + '/mcp', { reply_markup: menu(id) }),
+          () => {
+            if (!pending.has(id)) pending.set(id, 'mcp');
+            return send(chatId, 'MCP готов: https://' + domain + '/mcp', { reply_markup: menu(id) });
+          },
           error => {
             if (!pending.has(id)) pending.set(id, 'domain');
             onError(error);
@@ -119,17 +169,32 @@ function startBot({ telegram, db, auth, domainSetup, onError = console.error }) 
       return;
     }
     if (input === '/token') {
-      const domain = domainSetup.current();
+      const domain = issuer();
       if (!domain) return askDomain(chatId, id);
-      pending.delete(id);
+      pending.set(id, 'mcp');
       const { token } = auth.issue(id);
-      await send(chatId, ('https://' + domain + '/mcp\n\n') + 'Бессрочный ключ MCP:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
+      await send(chatId, (domain + '/mcp\n\n') + 'Бессрочный ключ MCP:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.', { protect_content: true, reply_markup: menu(id) });
       return;
     }
     if (input === '/revoke') {
+      pending.set(id, 'revoke-first');
+      confirmation.set(id, Date.now() + 120000);
+      return send(chatId, '1 из 2. Отозвать MCP-ключ? Подключённые клиенты потеряют доступ.', { reply_markup: menu(id) });
+    }
+    if (input === 'Продолжить отзыв' || input === 'Да, отозвать ключ') {
+      const first = input === 'Продолжить отзыв';
+      if (pending.get(id) !== (first ? 'revoke-first' : 'revoke-final') || !(confirmation.get(id) > Date.now())) {
+        if (pending.get(id)?.startsWith('revoke-')) pending.set(id, 'mcp');
+        return send(chatId, 'Подтверждение недействительно. Начни отзыв заново.', { reply_markup: menu(id) });
+      }
+      if (first) {
+        pending.set(id, 'revoke-final');
+        return send(chatId, '2 из 2. Точно отозвать ключ и отключить связанные подключения ChatGPT?', { reply_markup: menu(id) });
+      }
       auth.revoke(id);
-      await send(chatId, 'Ключи доступа отозваны.');
-      return;
+      confirmation.delete(id);
+      pending.set(id, 'mcp');
+      return send(chatId, 'Ключ отозван.', { reply_markup: menu(id) });
     }
     if (input === '/packs') {
       pending.delete(id);

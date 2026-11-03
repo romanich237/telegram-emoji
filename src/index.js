@@ -12,7 +12,7 @@ const telegram = new TelegramClient(config.telegram.botToken);
 const auth = setupAuth(db,config.allowedUsers);
 const app = createApp({ db, telegram, config, auth });
 const domainSetup = createDomainSetup(db, config.server.port);
-const stopBot = startBot({ telegram, db, auth, domainSetup });
+const stopBot = startBot({ telegram, db, auth, domainSetup, oauth: config.oauth, saveOAuth: config.saveOAuth, restart: shutdown });
 
 let stopUpdater = () => {};
 let shuttingDown = false;

@@ -3,13 +3,15 @@ const { createDatabase } = require('./database');
 const { TelegramClient } = require('./telegram');
 const { createApp } = require('./server');
 const { setupAuth } = require('./auth');
+const { createDomainSetup } = require('./domain');
 const { startBot } = require('./bot');
 
 const db = createDatabase(config.database.path);
 const telegram = new TelegramClient(config.telegram.botToken);
 const auth = setupAuth(db,config.allowedUsers);
 const app = createApp({ db, telegram, config, auth });
-const stopBot = startBot({ telegram, db, auth });
+const domainSetup = createDomainSetup(db, config.server.port);
+const stopBot = startBot({ telegram, db, auth, domainSetup });
 
 const server = app.listen(config.server.port,config.server.host,() => {
   console.log('Telegram Emoji MCP: http://' + config.server.host + ':' + config.server.port + '/mcp');

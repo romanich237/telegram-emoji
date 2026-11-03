@@ -9,9 +9,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-for command in node npm git nginx ss shuf; do
+for command in node npm git nginx; do
   command -v "$command" >/dev/null 2>&1 || {
-    echo "Не найдена команда $command. Нужны Node.js 20+, npm, git, nginx и iproute2."
+    echo "Не найдена команда $command. Нужны Node.js 20+, npm, git, и nginx."
     exit 1
   }
 done
@@ -22,12 +22,20 @@ if (( NODE_MAJOR < 20 )); then
   exit 1
 fi
 
+if ! command -v certbot >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y certbot
+fi
+
+systemctl enable --now certbot.timer
+
 if ! command -v pm2 >/dev/null 2>&1; then
   npm install --global pm2
 fi
 
 if [[ ! -f config.json ]]; then
-  read -r -p "Токен Telegram-бота: " BOT_TOKEN
+  read -r -s -p "Токен Telegram-бота: " BOT_TOKEN
+  echo
   read -r -p "Разрешённые Telegram ID (через запятую): " USER_IDS
   export BOT_TOKEN USER_IDS
   node <<'NODE'
@@ -46,73 +54,17 @@ fi
 npm install --omit=dev --no-audit --no-fund
 npm run check
 
-PORT_FILE="$APP_DIR/data/nginx-port"
-CONF="/etc/nginx/conf.d/telegram-emoji.conf"
-mkdir -p "$APP_DIR/data"
-
-is_port_free() {
-  local port="$1"
-  if ss -H -ltn "( sport = :$port )" | grep -q .; then return 1; fi
-  if grep -R -E -q "listen[[:space:]]+([^;]*:)?$port([[:space:];]|$)" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null; then return 1; fi
-  return 0
-}
-
-PORT=""
-if [[ -s "$PORT_FILE" ]]; then
-  SAVED_PORT="$(cat "$PORT_FILE")"
-  if [[ "$SAVED_PORT" =~ ^[0-9]+$ ]] && is_port_free "$SAVED_PORT"; then PORT="$SAVED_PORT"; fi
-fi
-
-if [[ -z "$PORT" ]]; then
-  for attempt in $(seq 1 300); do
-    CANDIDATE="$(shuf -i 20000-59999 -n 1)"
-    if is_port_free "$CANDIDATE"; then PORT="$CANDIDATE"; break; fi
-  done
-fi
-if [[ -z "$PORT" ]]; then echo "Не удалось найти свободный порт Nginx."; exit 1; fi
-
-BACKUP=""
-if [[ -f "$CONF" ]]; then BACKUP="$(mktemp)"; cp "$CONF" "$BACKUP"; fi
-restore_nginx_config() {
-  if [[ -n "$BACKUP" ]]; then cp "$BACKUP" "$CONF"; rm -f "$BACKUP"; else rm -f "$CONF"; fi
-}
-
-cat > "$CONF" <<EOF
-server {
-    listen $PORT;
-    server_name _;
-    client_max_body_size 1m;
-    location / {
-        proxy_pass http://127.0.0.1:3210;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 120s;
-        proxy_buffering off;
-    }
-}
-EOF
-
-if ! nginx -t; then
-  restore_nginx_config
-  echo "Nginx отклонил конфигурацию. Предыдущая конфигурация восстановлена."
-  exit 1
-fi
-rm -f "$BACKUP"
+# Remove the legacy public HTTP proxy. The bot provisions the HTTPS vhost.
 systemctl enable --now nginx
-systemctl reload nginx
-printf '%s\n' "$PORT" > "$PORT_FILE"
-chmod 600 "$PORT_FILE"
+CONF="/etc/nginx/conf.d/telegram-emoji.conf"
+if [[ -f "$CONF" ]]; then
+  mv "$CONF" "$CONF.disabled"
+  if ! nginx -t || ! systemctl reload nginx; then
+    mv "$CONF.disabled" "$CONF"
+    exit 1
+  fi
+fi
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 
-SERVER_IP="$(hostname -I | awk '{print $1}')"
-echo
-echo "Установка завершена."
-echo "MCP:    http://$SERVER_IP:$PORT/mcp"
-echo "Health: http://$SERVER_IP:$PORT/health"
-echo
-echo "Откройте порт $PORT в firewall и настройте HTTPS для внешнего доступа."
-echo "Получите временный MCP-ключ командой /token в Telegram."
+echo "Откройте личный чат с ботом и отправьте /start. Для настройки домена откройте порты 80 и 443."

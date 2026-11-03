@@ -1,10 +1,27 @@
+const { parseDomain } = require('./domain');
 const { searchEmojis } = require('./search');
 
-function startBot({ telegram, db, auth, onError = console.error }) {
+function startBot({ telegram, db, auth, domainSetup, onError = console.error }) {
   let running = true;
   let offset = 0;
   const selected = new Map();
-  const send = (chatId, text) => telegram.call('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
+  const pending = new Map();
+  const menu = {
+    keyboard: [['Поиск', 'Наборы'], ['Добавить набор', 'Подключение MCP'], ['Настроить домен', 'Отозвать ключ']],
+    resize_keyboard: true
+  };
+  const send = (chatId, text, options = {}) => telegram.call('sendMessage', {
+    chat_id: chatId, text, link_preview_options: { is_disabled: true }, ...options
+  });
+  const aliases = new Map([
+    ['Наборы', '/packs'], ['Подключение MCP', '/token'], ['Настроить домен', '/domain'],
+    ['Отозвать ключ', '/revoke']
+  ]);
+
+  async function askDomain(chatId, id) {
+    pending.set(id, 'domain');
+    await send(chatId, 'Введи домен, например emoji.example.com. Его A-запись должна вести на публичный IPv4 сервера. Для выпуска сертификата открой входящие порты 80 и 443.\n\n/cancel — отмена', { reply_markup: menu });
+  }
 
   async function handle(message) {
     if (!message?.from || message.chat?.type !== 'private') return;
@@ -14,15 +31,67 @@ function startBot({ telegram, db, auth, onError = console.error }) {
       await send(chatId, 'Доступ закрыт. Ваш Telegram ID: ' + id);
       return;
     }
-    const input = String(message.text || '').trim();
+    const text = String(message.text || '').trim();
+    let input = aliases.get(text) || text;
     if (!input) return;
+    if (input === '/cancel') {
+      pending.delete(id);
+      await send(chatId, 'Ввод отменён.', { reply_markup: menu });
+      return;
+    }
     if (input === '/start' || input === '/help') {
-      await send(chatId, 'Telegram Emoji MCP\n\n/add https://t.me/addemoji/PackName — добавить набор\n/packs — список наборов\n/use PackName — выбрать набор\n/find сердце — поиск внутри выбранного набора\n/token — получить временный ключ MCP (24 часа)\n/revoke — отозвать ключ');
+      pending.delete(id);
+      const domain = domainSetup.current();
+      if (!domain) {
+        await send(chatId, 'Telegram Emoji MCP. Начнём с настройки HTTPS.');
+        await askDomain(chatId, id);
+      } else {
+        await send(chatId, 'Telegram Emoji MCP\nhttps://' + domain + '/mcp\n\nДобавляй наборы и подбирай эмодзи для своих проектов.', { reply_markup: menu });
+      }
+      return;
+    }
+    if (input === '/domain') {
+      await askDomain(chatId, id);
+      return;
+    }
+    if (input === 'Поиск' || input === 'Добавить набор') {
+      pending.set(id, input === 'Поиск' ? 'search' : 'pack');
+      await send(chatId, input === 'Поиск' ? 'Введи эмодзи или слово для поиска по каталогу.' : 'Пришли ссылку на набор t.me/addemoji/…', { reply_markup: menu });
+      return;
+    }
+    if (!input.startsWith('/')) {
+      const action = pending.get(id);
+      if (action === 'domain') {
+        const domain = parseDomain(input);
+        pending.delete(id);
+        await send(chatId, 'Проверяю DNS и настраиваю HTTPS. Это может занять несколько минут.');
+        domainSetup.setup(domain).then(
+          () => send(chatId, 'MCP готов: https://' + domain + '/mcp', { reply_markup: menu }),
+          error => {
+            if (!pending.has(id)) pending.set(id, 'domain');
+            onError(error);
+            return send(chatId, error.code ? 'Не удалось завершить настройку. Проверь журнал PM2 и повтори попытку.' : error.message, { reply_markup: menu });
+          }
+        ).catch(onError);
+        return;
+      }
+      if (action === 'pack') input = '/add ' + input;
+      if (action === 'search') input = '/search ' + input;
+    }
+    if (input.startsWith('/search ')) {
+      if (pending.get(id) === 'search') pending.delete(id);
+      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji,
+        e.description || ' ' || p.title || ' ' || p.short_name AS description
+        FROM emojis e JOIN packs p ON p.id=e.pack_id ORDER BY e.id`).all();
+      const results = searchEmojis(rows, input.slice(8), 15);
+      await send(chatId, results.length ? results.map(item =>
+        (item.emoji || 'Эмодзи') + ' · ' + item.custom_emoji_id).join('\n') : 'Совпадений нет. Попробуй другой символ или запрос.');
       return;
     }
     if (input === '/token') {
+      const domain = domainSetup.current();
       const { token } = auth.issue(id);
-      await send(chatId, 'Ключ MCP на 24 часа:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
+      await send(chatId, (domain ? 'https://' + domain + '/mcp\n\n' : 'Домен ещё не настроен.\n\n') + 'Ключ MCP на 24 часа:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.');
       return;
     }
     if (input === '/revoke') {
@@ -32,7 +101,7 @@ function startBot({ telegram, db, auth, onError = console.error }) {
     }
     if (input === '/packs') {
       const packs = db.prepare('SELECT title,short_name,total_count FROM packs ORDER BY title').all();
-      await send(chatId, packs.length ? packs.map(p => p.title + ' (' + p.short_name + '): ' + p.total_count).join('\n') : 'Наборов пока нет.');
+      await send(chatId, packs.length ? packs.slice(0, 20).map(p => p.title.slice(0, 90) + ' (' + p.short_name + '): ' + p.total_count).join('\n') : 'Наборов пока нет.');
       return;
     }
     if (input.startsWith('/add ')) {
@@ -56,6 +125,7 @@ function startBot({ telegram, db, auth, onError = console.error }) {
         }
       });
       tx();
+      if (pending.get(id) === 'pack') pending.delete(id);
       selected.set(id,name);
       await send(chatId,'Добавлен набор: ' + set.title + '\nЭмодзи: ' + set.stickers.length + '\nИспользуйте /find запрос');
       return;

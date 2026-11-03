@@ -206,7 +206,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
       for (let offset = 0; offset < packs.length; offset += 20) {
         const lines = packs.slice(offset, offset + 20).map(pack =>
           '№' + pack.id + ' ' + packLink({ ...pack, title: pack.title.slice(0, 90) }) + ' (' + pack.total_count + ')');
-        await send(chatId, lines.join('\n') + '\n\nВыбор набора: /use 1 (подставь его номер).',
+        await send(chatId, lines.join('\n') + '\n\nВыбор набора: /use 1 2 (укажи номера нужных наборов).',
           { parse_mode: 'HTML', reply_markup: menu(id) });
       }
       return;
@@ -234,33 +234,32 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
       });
       tx();
       pending.delete(id);
-      selected.set(id,name);
+      selected.set(id, [name]);
       await send(chatId,'Добавлен набор: ' + set.title + '\nЭмодзи: ' + set.stickers.length + '\nНажми «Поиск», чтобы найти эмодзи.', { reply_markup: menu(id) });
       return;
     }
     if (input.startsWith('/use ')) {
       const name = input.slice(5).trim();
-      const number = /^№?([1-9]\d*)$/.exec(name);
-      const pack = number
-        ? db.prepare('SELECT id,short_name,title FROM packs WHERE id=?').get(number[1])
-        : db.prepare('SELECT id,short_name,title FROM packs WHERE short_name=? OR title=?').get(name, name);
-      if (!pack) throw new Error('Набор не найден');
-      selected.set(id,pack.short_name);
-      await send(chatId, 'Выбран набор №' + pack.id + ' ' + packLink(pack), { parse_mode: 'HTML', reply_markup: menu(id) });
+      const numbers = /^№?[1-9]\d*(?:[\s,]+№?[1-9]\d*)*$/.test(name)
+        ? [...new Set(name.match(/\d+/g))] : null;
+      if (numbers && numbers.length > 20) throw new Error('Выбери до 20 наборов.');
+      const packs = numbers
+        ? numbers.map(number => db.prepare('SELECT id,short_name,title FROM packs WHERE id=?').get(number))
+        : [db.prepare('SELECT id,short_name,title FROM packs WHERE short_name=? OR title=?').get(name, name)];
+      const missing = packs.findIndex(pack => !pack);
+      if (missing !== -1) throw new Error(numbers ? 'Набор №' + numbers[missing] + ' не найден' : 'Набор не найден');
+      selected.set(id, packs.map(pack => pack.short_name));
+      await send(chatId, 'Выбранные наборы\n' + packs.map(pack => '№' + pack.id + ' ' + packLink(pack)).join('\n') +
+        '\n\nОтправь /find и запрос.', { parse_mode: 'HTML', reply_markup: menu(id) });
       return;
     }
     if (input.startsWith('/find ')) {
-      const name = selected.get(id);
-      if (!name) throw new Error('Сначала выберите набор: /use PackName');
-      const pack = db.prepare('SELECT id,title,short_name FROM packs WHERE short_name=?').get(name);
-      if (!pack) {
-        selected.delete(id);
-        return send(chatId, 'Выбранный набор удалён. Выбери другой через /use или нажми «Поиск».', { reply_markup: menu(id) });
-      }
-      const rows = db.prepare('SELECT custom_emoji_id,emoji,description FROM emojis WHERE pack_id=?').all(pack.id);
-      const results = searchEmojis(rows, input.slice(6), 20).map(item => ({
-        ...item, pack_id: pack.id, title: pack.title, short_name: pack.short_name
-      }));
+      const names = selected.get(id);
+      if (!names) throw new Error('Сначала выбери наборы, например /use 1 2');
+      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji, e.description, p.id AS pack_id, p.title, p.short_name
+        FROM emojis e JOIN packs p ON p.id=e.pack_id
+        WHERE p.short_name IN (${names.map(() => '?').join(',')}) ORDER BY e.id`).all(...names);
+      const results = searchEmojis(rows, input.slice(6), 20);
       await sendResults(chatId, id, results, 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');
       return;
     }

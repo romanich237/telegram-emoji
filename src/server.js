@@ -52,7 +52,7 @@ function makeMcpServer({ db, telegram, config }) {
 
   server.tool(
     'list_emoji_packs',
-    'Показывает все наборы эмодзи, которые сохранены в локальном каталоге.',
+    'Показывает наборы эмодзи и их постоянные номера id. Передай эти номера в pack_ids инструмента search_emojis.',
     {},
     async () => {
       const packs = db.prepare(`SELECT p.*, COUNT(e.id) AS indexed_count
@@ -115,12 +115,17 @@ function makeMcpServer({ db, telegram, config }) {
 
   server.tool(
     'search_emojis',
-    'Подбирает кастомные эмодзи по всему сохранённому каталогу. Ищет по символу, описанию и названию набора.',
-    { query: z.string().trim().min(1).max(300), limit: z.number().int().min(1).max(100).optional() },
-    async ({ query, limit }) => {
+    'Подбирает кастомные эмодзи по каталогу или выбранным номерам наборов из list_emoji_packs. Ищет по символу, описанию и названию набора.',
+    { query: z.string().trim().min(1).max(300), limit: z.number().int().min(1).max(100).optional(),
+      pack_ids: z.array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)).min(1).max(20).optional() },
+    async ({ query, limit, pack_ids }) => {
+      const ids = [...new Set(pack_ids || [])];
+      const missing = ids.filter(id => !db.prepare('SELECT 1 FROM packs WHERE id=?').get(id));
+      if (missing.length) throw new Error('Наборы не найдены: ' + missing.join(', '));
+      const filter = ids.length ? 'WHERE p.id IN (' + ids.map(() => '?').join(',') + ')' : '';
       const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji, e.description, e.is_animated,
-        e.is_video, p.short_name, p.title FROM emojis e JOIN packs p ON p.id=e.pack_id
-        ORDER BY e.id`).all();
+        e.is_video, p.id AS pack_id, p.short_name, p.title FROM emojis e JOIN packs p ON p.id=e.pack_id
+        ${filter} ORDER BY e.id`).all(...ids);
       const candidates = searchEmojis(rows.map(row => ({
         ...row, description: [row.description, row.title, row.short_name].filter(Boolean).join(' ')
       })), query, rows.length);
@@ -134,6 +139,8 @@ function makeMcpServer({ db, telegram, config }) {
           custom_emoji_id: item.custom_emoji_id,
           emoji: item.emoji,
           pack: 'https://t.me/addemoji/' + item.short_name,
+          pack_id: item.pack_id,
+          pack_title: item.title,
           format: item.is_video ? 'video' : item.is_animated ? 'animated' : 'static',
           preview_path: '/preview/' + encodeURIComponent(item.custom_emoji_id),
           telegram_html: '<tg-emoji emoji-id="' + item.custom_emoji_id + '">' + fallback + '</tg-emoji>'

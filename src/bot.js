@@ -36,19 +36,22 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
 
   const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  const packLink = pack => '<a href="https://t.me/addemoji/' + encodeURIComponent(pack.short_name) + '">' +
+    escapeHtml(pack.title.slice(0, 90)) + '</a>';
+
   async function sendResults(chatId, id, results, emptyMessage) {
     if (!results.length) return send(chatId, emptyMessage, { reply_markup: menu(id) });
     const rows = results.map(item => {
       const emoji = escapeHtml(item.emoji || '🙂');
       const tag = '<tg-emoji emoji-id="' + escapeHtml(item.custom_emoji_id) + '">' + emoji + '</tg-emoji>';
-      return { emoji, tag, code: '<code>' + escapeHtml(tag) + '</code>' };
+      return { emoji, tag, pack: '№' + item.pack_id + ' ' + packLink(item), code: '<code>' + escapeHtml(tag) + '</code>' };
     });
     const options = { parse_mode: 'HTML', reply_markup: menu(id) };
     try {
-      return await send(chatId, rows.map(row => row.tag + ' - ' + row.code).join('\n'), options);
+      return await send(chatId, rows.map(row => row.tag + ' - ' + row.code + ' · ' + row.pack).join('\n'), options);
     } catch (error) {
       if (!/custom.?emoji|parse entities/i.test(error.message)) throw error;
-      return send(chatId, rows.map(row => row.emoji + ' - ' + row.code).join('\n'), options);
+      return send(chatId, rows.map(row => row.emoji + ' - ' + row.code + ' · ' + row.pack).join('\n'), options);
     }
   }
 
@@ -161,7 +164,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     }
     if (input.startsWith('/search ')) {
       if (pending.get(id) === 'search') pending.delete(id);
-      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji,
+      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji, p.id AS pack_id, p.title, p.short_name,
         e.description || ' ' || p.title || ' ' || p.short_name AS description
         FROM emojis e JOIN packs p ON p.id=e.pack_id ORDER BY e.id`).all();
       const results = searchEmojis(rows, input.slice(8), 15);
@@ -198,8 +201,14 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     }
     if (input === '/packs') {
       pending.delete(id);
-      const packs = db.prepare('SELECT title,short_name,total_count FROM packs ORDER BY title').all();
-      await send(chatId, packs.length ? packs.slice(0, 20).map(p => p.title.slice(0, 90) + ' (' + p.short_name + '): ' + p.total_count).join('\n') : 'Наборов пока нет. Нажми «Добавить набор».', { reply_markup: menu(id) });
+      const packs = db.prepare('SELECT id,title,short_name,total_count FROM packs ORDER BY id').all();
+      if (!packs.length) return send(chatId, 'Наборов пока нет. Нажми «Добавить набор».', { reply_markup: menu(id) });
+      for (let offset = 0; offset < packs.length; offset += 20) {
+        const lines = packs.slice(offset, offset + 20).map(pack =>
+          '№' + pack.id + ' ' + packLink({ ...pack, title: pack.title.slice(0, 90) }) + ' (' + pack.total_count + ')');
+        await send(chatId, lines.join('\n') + '\n\nВыбор набора: /use 1 (подставь его номер).',
+          { parse_mode: 'HTML', reply_markup: menu(id) });
+      }
       return;
     }
     if (input.startsWith('/add ')) {
@@ -231,22 +240,27 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     }
     if (input.startsWith('/use ')) {
       const name = input.slice(5).trim();
-      const pack = db.prepare('SELECT short_name,title FROM packs WHERE short_name=? OR title=?').get(name,name);
+      const number = /^№?([1-9]\d*)$/.exec(name);
+      const pack = number
+        ? db.prepare('SELECT id,short_name,title FROM packs WHERE id=?').get(number[1])
+        : db.prepare('SELECT id,short_name,title FROM packs WHERE short_name=? OR title=?').get(name, name);
       if (!pack) throw new Error('Набор не найден');
       selected.set(id,pack.short_name);
-      await send(chatId,'Выбран набор: ' + pack.title);
+      await send(chatId, 'Выбран набор №' + pack.id + ' ' + packLink(pack), { parse_mode: 'HTML', reply_markup: menu(id) });
       return;
     }
     if (input.startsWith('/find ')) {
       const name = selected.get(id);
       if (!name) throw new Error('Сначала выберите набор: /use PackName');
-      const pack = db.prepare('SELECT id,title FROM packs WHERE short_name=?').get(name);
+      const pack = db.prepare('SELECT id,title,short_name FROM packs WHERE short_name=?').get(name);
       if (!pack) {
         selected.delete(id);
         return send(chatId, 'Выбранный набор удалён. Выбери другой через /use или нажми «Поиск».', { reply_markup: menu(id) });
       }
       const rows = db.prepare('SELECT custom_emoji_id,emoji,description FROM emojis WHERE pack_id=?').all(pack.id);
-      const results = searchEmojis(rows,input.slice(6),20);
+      const results = searchEmojis(rows, input.slice(6), 20).map(item => ({
+        ...item, pack_id: pack.id, title: pack.title, short_name: pack.short_name
+      }));
       await sendResults(chatId, id, results, 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');
       return;
     }

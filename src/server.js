@@ -5,7 +5,7 @@ const { z } = require('zod');
 const { searchEmojis } = require('./search');
 
 function makeMcpServer({ db, telegram, config }) {
-  const server = new McpServer({ name: 'telegram-emoji', version: '1.0.0' });
+  const server = new McpServer({ name: 'telegram-emoji', version: '1.1.0' });
 
   server.tool(
     'add_emoji_pack',
@@ -113,12 +113,22 @@ function makeMcpServer({ db, telegram, config }) {
   return server;
 }
 
-function createApp({ db, telegram, config }) {
+function createApp({ db, telegram, config, auth }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'telegram-emoji', version: '1.0.0' }));
+
+  function requireAccess(req, res, next) {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!auth.verify(token)) return res.status(401).json({ error: 'Unauthorized. Request /token from the Telegram bot.' });
+    next();
+  }
+
+  app.use('/preview', requireAccess);
+  app.use('/mcp', requireAccess);
 
   app.get('/preview/:customEmojiId', async (req, res) => {
     try {
@@ -135,10 +145,6 @@ function createApp({ db, telegram, config }) {
   });
 
   app.post('/mcp', async (req, res) => {
-    const expected = config.security.apiKey;
-    if (expected && req.headers.authorization !== `Bearer ${expected}`) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     const mcp = makeMcpServer({ db, telegram, config });
     res.on('close', () => { transport.close(); mcp.close(); });

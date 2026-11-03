@@ -1,0 +1,19 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3210,
+    "publicUrl": "http://127.0.0.1:3210"
+  },
+  "telegram": {
+    "botToken": ""
+  },
+  "database": {
+    "path": "./data/emoji.sqlite"
+  },
+  "security": {
+    "apiKey": ""
+  },
+  "search": {
+    "maxResults": 30
+  }
+}

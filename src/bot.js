@@ -192,7 +192,9 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
       if (!domain) return askDomain(chatId, id);
       pending.set(id, 'mcp');
       const { token } = auth.issue(id);
-      await send(chatId, (domain + '/mcp\n\n') + 'Бессрочный ключ MCP:\n' + token + '\n\nПередавайте его как Authorization: Bearer <ключ>. Не пересылайте другим.', { protect_content: true, reply_markup: menu(id) });
+      await send(chatId, escapeHtml(domain + '/mcp') + '\n\nБессрочный ключ MCP\n<code>' + escapeHtml(token) + '</code>' +
+        '\n\nНажми на ключ, чтобы скопировать. Передавай его как Authorization: Bearer &lt;ключ&gt;.',
+        { parse_mode: 'HTML', reply_markup: menu(id) });
       return;
     }
     if (input === '/revoke') {

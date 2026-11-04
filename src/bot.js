@@ -11,8 +11,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     { command: 'packs', description: 'Список наборов эмодзи' },
     { command: 'add', description: 'Добавить набор эмодзи' },
     { command: 'search', description: 'Поиск по всем наборам' },
-    { command: 'use', description: 'Выбрать наборы по номерам' },
-    { command: 'find', description: 'Поиск в выбранных наборах' },
+    { command: 'find', description: 'Поиск по всем наборам' },
     { command: 'mcp', description: 'Настройки MCP' },
     { command: 'token', description: 'Получить ключ MCP' },
     { command: 'cancel', description: 'Отменить текущее действие' }
@@ -21,7 +20,6 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     onError(new Error('Не удалось зарегистрировать команды бота: ' + error.message));
   });
   let offset = 0;
-  const selected = new Map();
   const pending = new Map();
   const hasEmojis = db.prepare('SELECT 1 FROM emojis LIMIT 1');
   const decorateKeyboard = createEmojiKeyboard(db);
@@ -61,7 +59,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     const rows = results.map(item => {
       const emoji = escapeHtml(item.emoji || '🙂');
       const tag = '<tg-emoji emoji-id="' + escapeHtml(item.custom_emoji_id) + '">' + emoji + '</tg-emoji>';
-      return { emoji, tag, pack: '№' + item.pack_id + ' ' + packLink(item), code: '<code>' + escapeHtml(tag) + '</code>' };
+      return { emoji, tag, pack: packLink(item), code: '<code>' + escapeHtml(tag) + '</code>' };
     });
     const options = { parse_mode: 'HTML', reply_markup: menu(id) };
     try {
@@ -88,6 +86,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
     const text = String(message.text || '').trim();
     let input = aliases.get(text) || text;
     if (!input) return;
+    input = input.replace(/^\/find(?=\s|$)/, '/search');
     if (input === '/cancel') {
       confirmation.delete(id);
       pending.delete(id);
@@ -222,8 +221,8 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
       if (!packs.length) return send(chatId, 'Наборов пока нет. Нажми «Добавить набор».', { reply_markup: menu(id) });
       for (let offset = 0; offset < packs.length; offset += 20) {
         const lines = packs.slice(offset, offset + 20).map(pack =>
-          '№' + pack.id + ' ' + packLink({ ...pack, title: pack.title.slice(0, 90) }) + ' (' + pack.total_count + ')');
-        await send(chatId, lines.join('\n') + '\n\nВыбор набора: /use 1 2 (укажи номера нужных наборов).',
+          packLink({ ...pack, title: pack.title.slice(0, 90) }) + ' (' + pack.total_count + ')');
+        await send(chatId, lines.join('\n'),
           { parse_mode: 'HTML', reply_markup: menu(id) });
       }
       return;
@@ -251,33 +250,7 @@ function startBot({ telegram, db, auth, domainSetup, oauth, saveOAuth, restart, 
       });
       tx();
       pending.delete(id);
-      selected.set(id, [name]);
       await send(chatId,'Добавлен набор: ' + set.title + '\nЭмодзи: ' + set.stickers.length + '\nНажми «Поиск», чтобы найти эмодзи.', { reply_markup: menu(id) });
-      return;
-    }
-    if (input.startsWith('/use ')) {
-      const name = input.slice(5).trim();
-      const numbers = /^№?[1-9]\d*(?:[\s,]+№?[1-9]\d*)*$/.test(name)
-        ? [...new Set(name.match(/\d+/g))] : null;
-      if (numbers && numbers.length > 20) throw new Error('Выбери до 20 наборов.');
-      const packs = numbers
-        ? numbers.map(number => db.prepare('SELECT id,short_name,title FROM packs WHERE id=?').get(number))
-        : [db.prepare('SELECT id,short_name,title FROM packs WHERE short_name=? OR title=?').get(name, name)];
-      const missing = packs.findIndex(pack => !pack);
-      if (missing !== -1) throw new Error(numbers ? 'Набор №' + numbers[missing] + ' не найден' : 'Набор не найден');
-      selected.set(id, packs.map(pack => pack.short_name));
-      await send(chatId, 'Выбранные наборы\n' + packs.map(pack => '№' + pack.id + ' ' + packLink(pack)).join('\n') +
-        '\n\nОтправь /find и запрос.', { parse_mode: 'HTML', reply_markup: menu(id) });
-      return;
-    }
-    if (input.startsWith('/find ')) {
-      const names = selected.get(id);
-      if (!names) throw new Error('Сначала выбери наборы, например /use 1 2');
-      const rows = db.prepare(`SELECT e.custom_emoji_id, e.emoji, e.description, p.id AS pack_id, p.title, p.short_name
-        FROM emojis e JOIN packs p ON p.id=e.pack_id
-        WHERE p.short_name IN (${names.map(() => '?').join(',')}) ORDER BY e.id`).all(...names);
-      const results = searchEmojis(rows, input.slice(6), 20);
-      await sendResults(chatId, id, results, 'Совпадений нет. Поиск по смыслу требует описаний эмодзи.');
       return;
     }
     await send(chatId,'Неизвестная команда. Используйте /help');
